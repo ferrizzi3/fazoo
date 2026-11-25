@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="180" height="48" viewBox="0 0 180 48" role="img" aria-label="Fazoo">
-  <polygon points="6,24 24,6 42,24 42,42 6,42" fill="#12305A"/>
-  <path d="M16 27l6 6 11-11" stroke="#F26B3A" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="54" y="35" font-family="Arial, Helvetica, sans-serif" font-size="32" font-weight="bold" letter-spacing="-1" fill="#12305A">Fazoo</text>
-</svg>
