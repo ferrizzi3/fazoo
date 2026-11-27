@@ -1,8 +1,24 @@
 import { hashSenha, confereSenha, assinaToken, verificaToken } from "./auth.js";
 import { pagamentos } from "./payments.js";
+import { criaArmazenamento } from "./armazenamento.js";
+import { randomBytes } from "node:crypto";
 
 const CATEGORIAS = ["Ar-condicionado", "Reparo elétrico", "Encanamento", "Construção civil", "Pintura"];
 const TAXA = 0.1; // 10% pagos pelo cliente por cima do orçamento
+
+// Anexos do pedido. Limites pensados para gastar pouco espaço no Blob:
+// fotos são reduzidas no celular antes do envio e o áudio é gravado em qualidade de voz.
+const MB = 1024 * 1024;
+export const ANEXOS = {
+  foto: { qtd: 30, max: 3 * MB, mimes: ["image/jpeg", "image/png", "image/webp"] },
+  video: { qtd: 2, max: 30 * MB, dur: 60, mimes: ["video/mp4", "video/quicktime", "video/webm"] },
+  audio: { qtd: 3, max: 3 * MB, dur: 180, mimes: ["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/aac"] },
+};
+const EXT = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+  "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
+  "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/aac": "aac",
+};
 
 class Erro extends Error {
   constructor(status, msg) {
@@ -60,12 +76,29 @@ const iniciais = (nome) =>
     .map((p) => p[0].toUpperCase())
     .join("");
 
+// "Ana Maria Souza" -> "Ana S." (usado para mostrar clientes sem expor o nome completo)
+const nomeCurto = (n) => {
+  const ps = String(n).split(/\s+/).filter(Boolean);
+  return ps.length > 1 ? `${ps[0]} ${ps[ps.length - 1][0].toUpperCase()}.` : ps[0];
+};
+
+// O Postgres devolve Date; o SQLite devolve texto "AAAA-MM-DD HH:MM:SS" em UTC.
+const dataIso = (v) => {
+  const d = v instanceof Date ? v : new Date(String(v).replace(" ", "T") + (/[zZ+]/.test(String(v)) ? "" : "Z"));
+  return isNaN(d) ? null : d.toISOString();
+};
+
 const exige = (u, papel) => {
   if (u.papel !== papel) throw new Erro(403, "Ação não permitida para o seu tipo de conta");
 };
 
 // Retorna uma função (req, res) para servidor Node comum ou função da Vercel.
-export function criaManipulador({ obterBanco, secret }) {
+export function criaManipulador({ obterBanco, secret, armazenamento }) {
+  const arm = armazenamento !== undefined ? armazenamento : criaArmazenamento({ secret });
+  const semArm = () => {
+    if (!arm) throw new Erro(503, "Anexos indisponíveis: conecte um Blob store ao projeto na Vercel");
+    return arm;
+  };
   const tentativas = new Map();
   function limite(req) {
     const ip = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim();
@@ -81,6 +114,21 @@ export function criaManipulador({ obterBanco, secret }) {
     const { all, one, run, ins, tx } = db;
     const m = req.method;
 
+    async function resumoCliente(id) {
+      const c = await one(`SELECT nome FROM usuarios WHERE id = ?`, id);
+      const r = await one(
+        `SELECT COUNT(a.nota) AS na, AVG(a.nota) AS m FROM avaliacoes_cliente a JOIN pedidos p ON p.id = a.pedido_id WHERE p.cliente_id = ?`,
+        id
+      );
+      const na = Number(r.na);
+      return {
+        id,
+        nome: nomeCurto(c.nome),
+        i: iniciais(nomeCurto(c.nome)),
+        n: na ? `${Number(r.m).toFixed(1).replace(".", ",")} · ${na} avaliaç${na > 1 ? "ões" : "ão"}` : "Sem avaliações ainda",
+      };
+    }
+
     async function reputacao(proId) {
       const r = await one(
         `SELECT COUNT(*) AS c, AVG(p.nota) AS m FROM pedidos p JOIN orcamentos o ON o.id = p.orcamento_aceito WHERE o.pro_id = ? AND p.status = 'fin'`,
@@ -90,6 +138,96 @@ export function criaManipulador({ obterBanco, secret }) {
       if (!c) return "Novo no Fazoo";
       const nota = r.m == null ? "Sem avaliações" : Number(r.m).toFixed(1).replace(".", ",");
       return `${nota} · ${c} serviço${c > 1 ? "s" : ""}`;
+    }
+
+    // Perfil que qualquer usuário logado pode ver: dados, estatísticas e avaliações.
+    // Do cliente que avaliou só aparece o primeiro nome e a inicial do sobrenome.
+    async function perfilPublico(id) {
+      const pro = await one(
+        `SELECT u.id, u.nome, u.criado, pf.bio, pf.cidade, pf.categorias
+         FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id WHERE u.id = ? AND u.papel = 'profissional'`,
+        id
+      );
+      if (!pro) return null;
+      const est = await one(
+        `SELECT COUNT(*) AS c, COUNT(p.nota) AS na, AVG(p.nota) AS m
+         FROM pedidos p JOIN orcamentos o ON o.id = p.orcamento_aceito WHERE o.pro_id = ? AND p.status = 'fin'`,
+        id
+      );
+      const avs = await all(
+        `SELECT p.nota, p.comentario, p.categoria, p.criado, c.nome
+         FROM pedidos p JOIN orcamentos o ON o.id = p.orcamento_aceito JOIN usuarios c ON c.id = p.cliente_id
+         WHERE o.pro_id = ? AND p.status = 'fin' AND p.nota IS NOT NULL ORDER BY p.id DESC LIMIT 30`,
+        id
+      );
+      return {
+        id: pro.id,
+        nome: pro.nome,
+        i: iniciais(pro.nome),
+        bio: pro.bio || "",
+        cidade: pro.cidade || "",
+        categorias: pro.categorias ? pro.categorias.split("|") : [],
+        desde: dataIso(pro.criado),
+        servicos: Number(est.c),
+        avaliacoes: Number(est.na),
+        media: est.m == null ? null : Math.round(Number(est.m) * 10) / 10,
+        lista: avs.map((a) => ({
+          nota: Number(a.nota),
+          comentario: a.comentario || "",
+          categoria: a.categoria,
+          cliente: nomeCurto(a.nome),
+          data: dataIso(a.criado),
+        })),
+      };
+    }
+
+    // Perfil básico do cliente: nome curto, cidade, data de cadastro e avaliações feitas pelos profissionais.
+    async function perfilCliente(id) {
+      const c = await one(
+        `SELECT u.id, u.nome, u.criado, pf.cidade FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id
+         WHERE u.id = ? AND u.papel = 'cliente'`,
+        id
+      );
+      if (!c) return null;
+      const est = await one(
+        `SELECT COUNT(*) AS c, COUNT(a.nota) AS na, AVG(a.nota) AS m
+         FROM pedidos p LEFT JOIN avaliacoes_cliente a ON a.pedido_id = p.id WHERE p.cliente_id = ? AND p.status = 'fin'`,
+        id
+      );
+      const avs = await all(
+        `SELECT a.nota, a.comentario, p.categoria, p.criado, us.nome
+         FROM avaliacoes_cliente a JOIN pedidos p ON p.id = a.pedido_id
+         JOIN orcamentos o ON o.id = p.orcamento_aceito JOIN usuarios us ON us.id = o.pro_id
+         WHERE p.cliente_id = ? ORDER BY p.id DESC LIMIT 30`,
+        id
+      );
+      return {
+        id: c.id,
+        tipo: "cliente",
+        nome: nomeCurto(c.nome),
+        i: iniciais(nomeCurto(c.nome)),
+        cidade: c.cidade || "",
+        desde: dataIso(c.criado),
+        servicos: Number(est.c),
+        avaliacoes: Number(est.na),
+        media: est.m == null ? null : Math.round(Number(est.m) * 10) / 10,
+        lista: avs.map((a) => ({
+          nota: Number(a.nota),
+          comentario: a.comentario || "",
+          categoria: a.categoria,
+          autor: a.nome,
+          data: dataIso(a.criado),
+        })),
+      };
+    }
+    // Profissional só vê o cliente que tem pedido aberto ou que contratou ele.
+    async function podeVerCliente(u, id) {
+      if (u.papel === "cliente") return u.id === id;
+      const r = await one(
+        `SELECT 1 AS ok FROM pedidos WHERE cliente_id = ? AND (status = 'aberto' OR orcamento_aceito IN (SELECT id FROM orcamentos WHERE pro_id = ?))`,
+        id, u.id
+      );
+      return !!r;
     }
 
     async function fmt(p, u, rep) {
@@ -110,6 +248,7 @@ export function criaManipulador({ obterBanco, secret }) {
       const lista = await Promise.all(
         orcs.map(async (o) => ({
           id: o.id,
+          pid: o.pro_id,
           p: o.nome,
           i: iniciais(o.nome),
           n: await repDe(o.pro_id),
@@ -120,6 +259,21 @@ export function criaManipulador({ obterBanco, secret }) {
       );
       let ch = [];
       let pg = null;
+      let avc = null;
+      if (p.status === "fin") {
+        const a = await one(`SELECT nota, comentario FROM avaliacoes_cliente WHERE pedido_id = ?`, p.id);
+        if (a) avc = { nota: Number(a.nota), comentario: a.comentario || "" };
+      }
+      const anx = { n: 0, apagados: 0 };
+      for (const r of await all(`SELECT status, COUNT(*) AS c FROM anexos WHERE pedido_id = ? GROUP BY status`, p.id)) {
+        if (r.status === "ok") anx.n = Number(r.c);
+        if (r.status === "apagado") anx.apagados = Number(r.c);
+      }
+      let cli = null;
+      if (u.papel === "profissional") {
+        if (!rep.has("c" + p.cliente_id)) rep.set("c" + p.cliente_id, resumoCliente(p.cliente_id));
+        cli = await rep.get("c" + p.cliente_id);
+      }
       if (aceito) {
         ch = (await all(`SELECT papel, texto FROM mensagens WHERE pedido_id = ? ORDER BY id`, p.id)).map((x) => ({
           w: x.papel === "cliente" ? "c" : "p",
@@ -144,7 +298,23 @@ export function criaManipulador({ obterBanco, secret }) {
         meu,
         jaOrcou,
         pg,
+        anx,
+        avc: u.papel === "profissional" || p.status === "fin" ? avc : null,
+        cli,
       };
+    }
+
+    // Serviço concluído: apaga fotos, vídeos e áudios do Blob para liberar espaço.
+    // Se falhar, o pedido segue concluído e o prazo automático do Blob apaga depois.
+    async function apagaAnexos(pedidoId) {
+      const lista = await all(`SELECT id, caminho FROM anexos WHERE pedido_id = ? AND status <> 'apagado'`, pedidoId);
+      if (!lista.length || !arm) return;
+      try {
+        await arm.apagar(lista.map((x) => x.caminho).filter(Boolean));
+        await run(`UPDATE anexos SET status = 'apagado' WHERE pedido_id = ?`, pedidoId);
+      } catch (e) {
+        console.error("Falha ao apagar anexos do pedido", pedidoId, e.message);
+      }
     }
 
     async function usuarioDoToken() {
@@ -196,6 +366,49 @@ export function criaManipulador({ obterBanco, secret }) {
     const u = await usuarioDoToken();
     if (m === "GET" && path === "/api/eu") return json(res, 200, u);
 
+    // ---- Perfil do profissional ----
+    if (m === "POST" && path === "/api/perfil" && u.papel === "cliente") {
+      const b = await corpo(req);
+      const cidade = texto(b.cidade, "Cidade", 0, 60);
+      await run(
+        `INSERT INTO perfis(usuario_id,cidade) VALUES(?,?) ON CONFLICT(usuario_id) DO UPDATE SET cidade = excluded.cidade`,
+        u.id, cidade
+      );
+      return json(res, 200, await perfilCliente(u.id));
+    }
+    if (m === "GET" && path === "/api/perfil" && u.papel === "cliente") return json(res, 200, await perfilCliente(u.id));
+    if (m === "POST" && path === "/api/perfil") {
+      exige(u, "profissional");
+      const b = await corpo(req);
+      const bio = texto(b.bio, "Sobre você", 0, 500);
+      const cidade = texto(b.cidade, "Cidade", 0, 60);
+      const cats = Array.isArray(b.categorias) ? [...new Set(b.categorias)] : [];
+      if (cats.some((c) => !CATEGORIAS.includes(c))) throw new Erro(400, "Categoria inválida");
+      await run(
+        `INSERT INTO perfis(usuario_id,bio,cidade,categorias) VALUES(?,?,?,?)
+         ON CONFLICT(usuario_id) DO UPDATE SET bio = excluded.bio, cidade = excluded.cidade, categorias = excluded.categorias`,
+        u.id, bio, cidade, cats.join("|")
+      );
+      return json(res, 200, await perfilPublico(u.id));
+    }
+    if (m === "GET" && path === "/api/perfil") {
+      exige(u, "profissional");
+      return json(res, 200, await perfilPublico(u.id));
+    }
+    const rc = path.match(/^\/api\/clientes\/(\d+)$/);
+    if (m === "GET" && rc) {
+      const id = Number(rc[1]);
+      const perfil = (await podeVerCliente(u, id)) && (await perfilCliente(id));
+      if (!perfil) throw new Erro(404, "Cliente não encontrado");
+      return json(res, 200, perfil);
+    }
+    const rp = path.match(/^\/api\/profissionais\/(\d+)$/);
+    if (m === "GET" && rp) {
+      const perfil = await perfilPublico(Number(rp[1]));
+      if (!perfil) throw new Erro(404, "Profissional não encontrado");
+      return json(res, 200, perfil);
+    }
+
     if (m === "GET" && path === "/api/pedidos") {
       const linhas =
         u.papel === "cliente"
@@ -217,7 +430,66 @@ export function criaManipulador({ obterBanco, secret }) {
       return json(res, 201, await fmt(await one("SELECT * FROM pedidos WHERE id = ?", id), u, new Map()));
     }
 
-    const r = path.match(/^\/api\/pedidos\/(\d+)(?:\/(\w+))?$/);
+    // ---- Anexos (fotos, vídeos e áudios) ----
+    const ra = path.match(/^\/api\/pedidos\/(\d+)\/anexos(?:\/(\d+)\/(ok|apagar))?$/);
+    if (ra) {
+      const p = await carregaPedido(Number(ra[1]), u);
+      if (m === "GET" && !ra[2]) {
+        const lista = await all(`SELECT id, tipo, mime, tamanho, duracao, caminho FROM anexos WHERE pedido_id = ? AND status = 'ok' ORDER BY id`, p.id);
+        const a = lista.length ? semArm() : null;
+        return json(res, 200, {
+          anexos: await Promise.all(
+            lista.map(async (x) => ({ id: x.id, tipo: x.tipo, mime: x.mime, tamanho: Number(x.tamanho), duracao: Number(x.duracao), url: await a.urlLeitura(x.caminho) }))
+          ),
+        });
+      }
+      if (m !== "POST") throw new Erro(404, "Rota não encontrada");
+      exige(u, "cliente");
+      if (p.status !== "aberto") throw new Erro(409, "Só dá para mexer nos anexos enquanto o pedido recebe orçamentos");
+      const a = semArm();
+      const b = await corpo(req);
+      if (!ra[2]) {
+        const cfg = ANEXOS[b.tipo];
+        if (!cfg) throw new Erro(400, "Tipo de anexo inválido");
+        const mime = String(b.mime || "").split(";")[0].trim().toLowerCase();
+        if (!cfg.mimes.includes(mime)) throw new Erro(400, "Formato de arquivo não aceito");
+        const tamanho = Math.round(Number(b.tamanho));
+        if (!(tamanho > 0)) throw new Erro(400, "Arquivo vazio");
+        if (tamanho > cfg.max) throw new Erro(400, `Arquivo grande demais (máximo ${cfg.max / MB} MB)`);
+        const duracao = Math.max(0, Math.round(Number(b.duracao) || 0));
+        if (cfg.dur && duracao > cfg.dur) throw new Erro(400, `Duração máxima: ${cfg.dur} segundos`);
+        const cont = await one(
+          `SELECT COUNT(*) AS c, SUM(CASE WHEN status = 'ok' AND tipo = ? THEN 1 ELSE 0 END) AS t FROM anexos WHERE pedido_id = ? AND status <> 'apagado'`,
+          b.tipo, p.id
+        );
+        if (Number(cont.t || 0) >= cfg.qtd) throw new Erro(409, `Limite de ${cfg.qtd} ${b.tipo === "foto" ? "fotos" : b.tipo === "video" ? "vídeos" : "áudios"} por pedido`);
+        if (Number(cont.c) >= 60) throw new Erro(409, "Limite de anexos atingido");
+        const id = await ins("INSERT INTO anexos(pedido_id,tipo,mime,tamanho,duracao) VALUES(?,?,?,?,?)", p.id, b.tipo, mime, tamanho, duracao);
+        // Nome difícil de adivinhar; a pasta por pedido facilita conferir e apagar.
+        const caminho = `pedidos/${p.id}/${id}-${randomBytes(9).toString("base64url")}.${EXT[mime]}`;
+        await run("UPDATE anexos SET caminho = ? WHERE id = ?", caminho, id);
+        return json(res, 201, { id, mime, url: await a.urlEnvio({ caminho, mime, max: cfg.max }) });
+      }
+      const x = await one("SELECT * FROM anexos WHERE id = ? AND pedido_id = ?", Number(ra[2]), p.id);
+      if (!x || x.status === "apagado") throw new Erro(404, "Anexo não encontrado");
+      if (ra[3] === "ok") {
+        if (x.status !== "enviando") return json(res, 200, { ok: true });
+        const t = await a.tamanho(x.caminho);
+        if (t == null) throw new Erro(409, "O arquivo ainda não chegou. Tente enviar de novo.");
+        if (t > ANEXOS[x.tipo].max) {
+          await a.apagar([x.caminho]);
+          await run("UPDATE anexos SET status = 'apagado' WHERE id = ?", x.id);
+          throw new Erro(400, "Arquivo grande demais");
+        }
+        await run("UPDATE anexos SET status = 'ok', tamanho = ? WHERE id = ?", t, x.id);
+        return json(res, 200, { ok: true });
+      }
+      await a.apagar([x.caminho]);
+      await run("UPDATE anexos SET status = 'apagado' WHERE id = ?", x.id);
+      return json(res, 200, { ok: true });
+    }
+
+    const r = path.match(/^\/api\/pedidos\/(\d+)(?:\/([\w-]+))?$/);
     if (!r) throw new Erro(404, "Rota não encontrada");
     const p = await carregaPedido(Number(r[1]), u);
     const acao = r[2];
@@ -279,6 +551,7 @@ export function criaManipulador({ obterBanco, secret }) {
         await t.run("UPDATE pagamentos SET status = 'liberado' WHERE id = ?", pg.id);
         await t.run("UPDATE pedidos SET status = 'fin' WHERE id = ?", p.id);
       });
+      await apagaAnexos(p.id);
       return devolve();
     }
     if (acao === "disputa") {
@@ -302,6 +575,19 @@ export function criaManipulador({ obterBanco, secret }) {
       await run("UPDATE pedidos SET nota = ?, comentario = ? WHERE id = ?", nota, texto(b.comentario, "Comentário", 0, 200), p.id);
       return devolve();
     }
+    if (acao === "avaliar-cliente") {
+      exige(u, "profissional");
+      if (p.status !== "fin" || (await quemAceitou(p)) !== u.id) throw new Erro(409, "Avaliação indisponível");
+      const nota = Number(b.nota);
+      if (!Number.isInteger(nota) || nota < 1 || nota > 5) throw new Erro(400, "Nota de 1 a 5");
+      try {
+        await run("INSERT INTO avaliacoes_cliente(pedido_id,nota,comentario) VALUES(?,?,?)", p.id, nota, texto(b.comentario, "Comentário", 0, 200));
+      } catch (e) {
+        if (db.ehDuplicado(e)) throw new Erro(409, "Você já avaliou este cliente");
+        throw e;
+      }
+      return devolve();
+    }
     throw new Erro(404, "Rota não encontrada");
   }
 
@@ -320,6 +606,7 @@ export function criaManipulador({ obterBanco, secret }) {
         }
       }
       if (!secret) throw new Erro(500, "Servidor sem JWT_SECRET configurada");
+      if (path.startsWith("/api/arquivos/") && arm?.modo === "local") return await arm.atende(req, res, new URL(req.url, "http://x"));
       if (path.startsWith("/api/")) return await api(req, res, path);
       throw new Erro(404, "Rota não encontrada");
     } catch (e) {

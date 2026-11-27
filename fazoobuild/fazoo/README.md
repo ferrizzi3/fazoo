@@ -2,15 +2,44 @@
 
 Aplicativo de serviços residenciais que conecta clientes a profissionais (ar-condicionado, reparo elétrico, encanamento, construção civil e mais), com orçamentos online e pagamento protegido.
 
-> Status: versão de testes funcional (login, pedidos, orçamentos, chat, avaliação). O pagamento é **simulado**: nenhuma cobrança real é feita.
+> Status: versão de testes funcional (login, pedidos, orçamentos, chat, avaliação, perfis de profissional e cliente, fotos/vídeos/áudios no pedido). O pagamento é **simulado**: nenhuma cobrança real é feita.
 
 ## Como funciona
 
 1. O cliente se cadastra gratuitamente e publica o serviço que procura.
 2. Os profissionais cadastrados veem o pedido e enviam orçamento online.
-3. O cliente compara os orçamentos e escolhe.
+3. O cliente compara os orçamentos e abre o perfil de cada profissional (nota média, serviços concluídos, cidade, especialidades, "sobre" e avaliações de outros clientes) antes de escolher.
 4. O cliente aceita e paga. O pagamento fica retido na plataforma.
 5. Quando o profissional marca como concluído e o cliente confirma, o pagamento é liberado.
+
+### Perfil do profissional
+
+- O profissional edita o próprio perfil em **Meu perfil público** (cidade, serviços que faz e texto "Sobre").
+- Rotas: `GET /api/profissionais/:id` (perfil público), `GET /api/perfil` e `POST /api/perfil` (o próprio profissional).
+- Nas avaliações aparece só o primeiro nome e a inicial do sobrenome do cliente.
+- Os dados ficam na tabela `perfis`, criada sozinha na primeira requisição (não apaga nada do banco atual).
+
+### Perfil do cliente
+
+- Mostra só o básico: nome abreviado (ex.: "Ana S."), cidade, data de cadastro, serviços contratados e nota média.
+- Depois que o pagamento é liberado, o profissional avalia o cliente (1 a 5 estrelas e comentário). Essas avaliações aparecem no perfil do cliente.
+- Quem vê: o próprio cliente e os profissionais que podem ver algum pedido dele (pedido aberto ou serviço que ele contratou com aquele profissional). Um cliente não vê o perfil de outro.
+- Rotas: `GET /api/clientes/:id`, `GET/POST /api/perfil` (o cliente só edita a cidade) e `POST /api/pedidos/:id/avaliar-cliente`.
+- As avaliações ficam na tabela `avaliacoes_cliente`, também criada sozinha.
+
+### Fotos, vídeos e áudios no pedido
+
+- No novo pedido o cliente anexa até **30 fotos**, **2 vídeos** (até 60 s e 30 MB cada) e **3 áudios** (até 3 min). O áudio é gravado na hora, como no WhatsApp: segure 🎤 e solte para terminar, ou toque uma vez para gravar sem segurar.
+- Para gastar pouco espaço: as fotos são reduzidas no celular (máx. 1600 px, JPEG, em geral 50–400 KB) e o áudio é gravado em qualidade de voz (32 kbps, ~250 KB por minuto).
+- Os arquivos ficam num **Vercel Blob privado**. O navegador envia direto para o Blob por um link assinado (válido 15 min), sem passar pela função da Vercel. Para ver, o servidor gera links assinados válidos por 1 hora, só para quem pode ver o pedido.
+- **Quando o cliente confirma a conclusão, os arquivos são apagados.** Em disputa, ficam guardados. Como garantia, o Blob apaga cada arquivo sozinho depois de 60 dias (`TTL_DIAS` em `server/armazenamento.js`).
+- Sem Blob conectado e rodando no computador (`npm start`), os arquivos vão para `./data/anexos` (modo local, usado também nos testes).
+- Rotas: `GET/POST /api/pedidos/:id/anexos`, `POST /api/pedidos/:id/anexos/:anexoId/ok` e `.../apagar`.
+
+#### Configurar o Blob na Vercel (uma vez)
+
+1. No painel da Vercel: **Storage → Create → Blob**, escolha acesso **Private** e conecte ao projeto **fazoo** (Production e Preview).
+2. Rode `npm install` (instala o `@vercel/blob`) e publique de novo.
 
 ## Regras de negócio
 
