@@ -11,6 +11,7 @@ const TIPOS = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".ico": "image/x-icon",
 };

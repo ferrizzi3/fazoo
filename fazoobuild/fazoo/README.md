@@ -36,10 +36,26 @@ Aplicativo de serviços residenciais que conecta clientes a profissionais (ar-co
 - Sem Blob conectado e rodando no computador (`npm start`), os arquivos vão para `./data/anexos` (modo local, usado também nos testes).
 - Rotas: `GET/POST /api/pedidos/:id/anexos`, `POST /api/pedidos/:id/anexos/:anexoId/ok` e `.../apagar`.
 
+### Editar o pedido depois de publicado
+
+- Enquanto o pedido recebe orçamentos, o cliente toca em **Editar pedido** e muda título, categoria, descrição e anexos (adiciona ou remove fotos, vídeos e áudios). Depois de aceitar um orçamento, não dá mais para editar.
+- O pedido ganha o aviso "Pedido editado pelo cliente em dd/mm, hh:mm" e aparece como **editado** na lista do profissional, que pode abri-lo de novo para ver o que mudou.
+- Rota: `POST /api/pedidos/:id/editar`. A data da última edição fica na tabela `pedidos_edicoes`.
+
 #### Configurar o Blob na Vercel (uma vez)
 
 1. No painel da Vercel: **Storage → Create → Blob**, escolha acesso **Private** e conecte ao projeto **fazoo** (Production e Preview).
 2. Rode `npm install` (instala o `@vercel/blob`) e publique de novo.
+
+### Cidades, raio e busca de profissionais
+
+- Na criação da conta, cliente e profissional escolhem a cidade numa lista com os 5.570 municípios do Brasil (`public/cidades.json`). Contas antigas veem um aviso para informar a cidade no perfil.
+- **Topo da tela:** no centro, a cidade usada nos filtros (começa com a do perfil e pode ser trocada); à direita, o botão do perfil (nome, cidade, dados do profissional e "Sair da conta").
+- **Novo pedido:** o cliente escolhe o alcance (só na cidade, 10, 25, 50 ou 100 km) e vê quantos profissionais estão nessa área.
+- **Profissional:** em "Novos pedidos" aparecem os pedidos cujo alcance chega à cidade do topo. Pedido já orçado continua aparecendo para ele.
+- **Encontrar profissionais:** lista por distância da cidade do topo, com filtro de raio e de serviço.
+- A distância é em linha reta entre os centros das cidades (`server/cidades.js`). Coordenadas de [kelvins/municipios-brasileiros](https://github.com/kelvins/municipios-brasileiros), licença MIT (`LICENSE-cidades.txt`).
+- Rotas: `GET /api/profissionais?cidade=&raio=&categoria=`, `GET /api/pedidos?cidade=`; `cidade` e `raio` em `POST /api/registro`, `POST /api/perfil`, `POST /api/pedidos` e `.../editar`. As colunas novas (`usuarios.cidade_id`, `pedidos.cidade_id`, `pedidos.raio_km`) são criadas sozinhas.
 
 ## Regras de negócio
 

@@ -26,7 +26,7 @@ const toast = (m, ok) => {
   clearTimeout(toast.h);
   toast.h = setTimeout(() => (t.style.display = "none"), 4000);
 };
-const load = async () => { D.ps = await api("GET", "/pedidos"); };
+const load = async () => { D.ps = await api("GET", "/pedidos" + qCid()); };
 const guarda = (t) => { try { t ? localStorage.setItem(TOK_KEY, t) : localStorage.removeItem(TOK_KEY); } catch (e) {} };
 
 const av = (i) => `<div class="av">${esc(i)}</div>`;
@@ -36,7 +36,30 @@ const row = (l, r) => `<div class="sp"><span>${l}</span><span>${r}</span></div>`
 const tip = (x) => card(x, "tip");
 const head = (t, s, back) =>
   `<div class="hd">${back ? '<button class="bk" data-a="back">‹ Voltar</button>' : ""}<div class="b">${t}</div>${s ? `<div class="sub">${s}</div>` : ""}</div>`;
-const bar = () => `<div class="rl"><span>Fazoo</span><span class="nt" style="flex:none">${esc(ME.nome)}</span><button data-a="sair">Sair</button></div>`;
+// Topo: logo · cidade escolhida (centro) · botão do perfil (iniciais)
+const bar = () =>
+  `<div class="rl"><span class="lg">Fazoo</span>${botaoCidTopo()}<span class="rt"><button class="avb" data-a="meu" title="Meu perfil e configurações">${esc(
+    ME.nome.split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join("")
+  )}</button></span></div>`;
+// "Campinas - SP" -> { id, nome, uf } usando o código que veio do servidor
+const cidDe = (id, txt) => {
+  if (!id || !txt) return null;
+  const k = txt.lastIndexOf(" - ");
+  return { id, nome: txt.slice(0, k), uf: txt.slice(k + 3) };
+};
+const locTxt = (p) =>
+  p.loc && p.loc.cidade
+    ? `<div class="nt">📍 ${esc(p.loc.cidade)}${p.loc.raio != null ? ` · alcance ${p.loc.raio ? p.loc.raio + " km" : "só na cidade"}` : ""}${
+        ME.papel == "profissional" && p.loc.dist ? ` · ${p.loc.dist} km de ${esc(cidAtual() ? cidAtual().nome : "você")}` : ""
+      }</div>`
+    : "";
+const REG = { no: "", em: "", se: "", pa: "cliente", cid: null };
+const guardaReg = () => {
+  if (!$("#em")) return;
+  REG.em = $("#em").value;
+  REG.se = $("#se").value;
+  if ($("#no")) { REG.no = $("#no").value; REG.pa = $("#pa").value; }
+};
 const primeiro = () => esc(ME.nome.split(" ")[0]);
 
 const steps = (p, me) => {
@@ -88,13 +111,15 @@ const authV = () =>
   head("Fazoo", "Serviços para a sua casa, com pagamento protegido") +
   `<div class="pd"><div class="two"><button class="b2 tab ${modo == "login" ? "on2" : ""}" data-a="modo" data-w="login">Entrar</button><button class="b2 tab ${modo == "reg" ? "on2" : ""}" data-a="modo" data-w="reg">Criar conta</button></div>${
     modo == "reg"
-      ? '<input id="no" placeholder="Seu nome" maxlength="80" autocomplete="name"><select id="pa"><option value="cliente">Quero contratar serviços</option><option value="profissional">Sou profissional</option></select>'
+      ? `<input id="no" placeholder="Seu nome" maxlength="80" autocomplete="name" value="${esc(REG.no)}"><select id="pa"><option value="cliente"${REG.pa == "cliente" ? " selected" : ""}>Quero contratar serviços</option><option value="profissional"${REG.pa == "profissional" ? " selected" : ""}>Sou profissional</option></select>` +
+        `<button class="b2 cidb" data-a="regCid">📍 ${REG.cid ? esc(fmtCid(REG.cid)) : "Escolha sua cidade"}</button>`
       : ""
-  }<input id="em" type="email" placeholder="E-mail" maxlength="120" autocomplete="email"><input id="se" type="password" placeholder="Senha (mínimo 6 caracteres)" maxlength="100" autocomplete="${modo == "reg" ? "new-password" : "current-password"}"><button class="bt" data-a="auth">${modo == "reg" ? "Criar conta" : "Entrar"}</button></div>`;
+  }<input id="em" type="email" placeholder="E-mail" maxlength="120" autocomplete="email" value="${esc(REG.em)}"><input id="se" type="password" placeholder="Senha (mínimo 6 caracteres)" maxlength="100" autocomplete="${modo == "reg" ? "new-password" : "current-password"}" value="${esc(REG.se)}"><button class="bt" data-a="auth">${modo == "reg" ? "Criar conta" : "Entrar"}</button></div>`;
 
+const semCidade = () => (ME.cidade ? "" : tip(`<b>Informe sua cidade</b> para ver pedidos e profissionais perto de você. <button class="lk" data-a="meu">Abrir meu perfil</button>`));
 const homeC = () =>
   head("Olá, " + primeiro(), "Seus pedidos") +
-  `<div class="pd"><button class="bt" data-a="new">+ Novo pedido</button><button class="b2" data-a="meu">Meu perfil</button>` +
+  `<div class="pd">${semCidade()}<button class="bt" data-a="new">+ Novo pedido</button><button class="b2" data-a="busca">🔎 Encontrar profissionais</button>` +
   (D.ps.map((p) => tap("open", p.id, `<div class="sp"><b>${esc(p.t)}</b><span class="ch">${ST[p.st]}</span></div><div class="nt">${p.ac != null ? esc(p.orc[p.ac].p) : p.orc.length + " orçamento(s) recebido(s)"}</div>`)).join("") ||
     '<div class="nt c">Você ainda não publicou pedidos.</div>') +
   "</div>";
@@ -103,16 +128,31 @@ const newC = () =>
   `<div class="pd"><select id="cat">${CATS.map((c) => `<option${c == NOVO.cat ? " selected" : ""}>${c}</option>`).join("")}</select>` +
   `<input id="t" placeholder="Ex.: Trocar tomadas do quarto" maxlength="80" value="${esc(NOVO.t)}">` +
   `<textarea id="d" placeholder="Detalhes do serviço" maxlength="400">${esc(NOVO.d)}</textarea>` +
+  alcance(FORM) +
   barraAnexos() +
   (ENVIO ? `<div class="cd tip c" id="envio">${esc(ENVIO)}</div>` : "") +
   `<button class="bt" data-a="pub"${ENVIO || GRAV ? " disabled" : ""}>Publicar pedido</button></div>`;
+const quando = (iso) => new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const avisoEd = (p) => (p.ed ? `<div class="nt">✏️ Pedido editado pelo cliente em ${quando(p.ed)}</div>` : "");
 const detC = (p) =>
-  head(esc(p.t), ST[p.st], 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}`) + galeria(p) +
+  head(esc(p.t), ST[p.st], 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}${locTxt(p)}${avisoEd(p)}`) + galeria(p) +
+  (p.st == "aberto" ? `<button class="b2" data-a="editar" data-id="${p.id}">✏️ Editar pedido</button>` : "") +
   (p.st == "aberto"
     ? `<h3>Orçamentos</h3>` +
       (p.orc.map((o, i) => card(`<div class="r">${av(o.i)}<div class="f"><b>${esc(o.p)}</b><div class="nt">${esc(o.n)} · ${esc(o.z)}</div></div><b>${R(o.v)}</b></div>${o.m ? `<div class="nt">“${esc(o.m)}”</div>` : ""}<div class="two"><button class="b2 tab" data-a="pro" data-pid="${o.pid}">Ver perfil</button><button class="b2 tab" data-a="acc" data-id="${p.id}" data-i="${i}">Aceitar</button></div>`)).join("") ||
         '<div class="nt">Aguardando profissionais…</div>')
     : svc(p, "c")) + "</div>";
+// Edição de um pedido já publicado (enquanto recebe orçamentos): texto e anexos.
+const editC = (p) =>
+  head("Editar pedido", esc(p.t), 1) +
+  `<div class="pd"><select id="cat">${CATS.map((c) => `<option${c == FORM.cat ? " selected" : ""}>${c}</option>`).join("")}</select>` +
+  `<input id="t" placeholder="Título do pedido" maxlength="80" value="${esc(FORM.t)}">` +
+  `<textarea id="d" placeholder="Detalhes do serviço" maxlength="400">${esc(FORM.d)}</textarea>` +
+  alcance(FORM) +
+  barraAnexos() +
+  (p.norc || p.orc.length ? tip("Quem já mandou orçamento vai ver o aviso de que o pedido foi editado.") : "") +
+  (ENVIO ? `<div class="cd tip c" id="envio">${esc(ENVIO)}</div>` : "") +
+  `<button class="bt" data-a="salvaEd" data-id="${p.id}"${ENVIO || GRAV ? " disabled" : ""}>Salvar alterações</button></div>`;
 const payC = (p, i) => {
   const o = p.orc[i];
   return head("Pagamento", esc(p.t), 1) + `<div class="pd">` + card(`<div class="r">${av(o.i)}<b>${esc(o.p)}</b></div>`) +
@@ -125,18 +165,21 @@ function homeP() {
   const n = D.ps.filter((p) => p.st == "aberto" && !p.jaOrcou), e = D.ps.filter((p) => p.st == "aberto" && p.jaOrcou), m = D.ps.filter((p) => p.meu);
   const sum = (f) => m.filter(f).reduce((s, p) => s + p.orc[p.ac].v, 0);
   return head("Olá, " + primeiro(), "Painel do profissional") +
-    `<div class="pd"><button class="b2" data-a="meu">Meu perfil público</button><div class="two"><div class="cd"><div class="nt">Retido</div><div class="big">${R(sum((p) => p.st == "and" || p.st == "dis"))}</div></div><div class="cd"><div class="nt">Liberado</div><div class="big">${R(sum((p) => p.st == "fin"))}</div></div></div><h3>Novos pedidos</h3>` +
-    (n.map((p) => tap("pq", p.id, `<div class="sp"><b>${esc(p.t)}</b><span class="ch">novo</span></div><div class="nt">${esc(p.c)} · ${p.norc} orçamento(s) já enviados</div>`)).join("") || '<div class="nt">Nenhum pedido novo no momento.</div>') +
-    (e.length ? "<h3>Orçamentos enviados</h3>" + e.map((p) => card(`<b>${esc(p.t)}</b><div class="nt">Aguardando o cliente decidir.</div>`)).join("") : "") +
-    (m.length ? "<h3>Meus serviços</h3>" + m.map((p) => tap("open", p.id, `<div class="sp"><b>${esc(p.t)}</b><span class="ch">${ST[p.st]}</span></div><div class="nt">${R(p.orc[p.ac].v)}</div>`)).join("") : "") + "</div>";
+    `<div class="pd">${semCidade()}<div class="two"><div class="cd"><div class="nt">Retido</div><div class="big">${R(sum((p) => p.st == "and" || p.st == "dis"))}</div></div><div class="cd"><div class="nt">Liberado</div><div class="big">${R(sum((p) => p.st == "fin"))}</div></div></div><h3>Novos pedidos</h3>${cidAtual() ? `<div class="nt">Pedidos cujo alcance chega a ${esc(fmtCid(cidAtual()))}. Troque a cidade no topo para ver outras regiões.</div>` : ""}` +
+    (n.map((p) => tap("pq", p.id, `<div class="sp"><b>${esc(p.t)}</b><span class="ch">${p.ed ? "editado" : "novo"}</span></div><div class="nt">${esc(p.c)} · ${p.norc} orçamento(s) já enviados</div>${locTxt(p)}`)).join("") || '<div class="nt">Nenhum pedido novo no momento.</div>') +
+    (e.length ? "<h3>Orçamentos enviados</h3>" + e.map((p) => tap("open", p.id, `<div class="sp"><b>${esc(p.t)}</b>${p.ed ? '<span class="ch">editado</span>' : ""}</div><div class="nt">Aguardando o cliente decidir.</div>`)).join("") : "") +
+    `<button class="b2" data-a="busca">🔎 Ver profissionais da região</button>` +
+  (m.length ? "<h3>Meus serviços</h3>" + m.map((p) => tap("open", p.id, `<div class="sp"><b>${esc(p.t)}</b><span class="ch">${ST[p.st]}</span></div><div class="nt">${R(p.orc[p.ac].v)}</div>`)).join("") : "") + "</div>";
 }
 const cliCard = (p) =>
-  p.cli ? `<div class="cd tap" data-a="cli" data-cid="${p.cli.id}"><div class="r">${av(p.cli.i)}<div class="f"><div class="nt">Cliente</div><b>${esc(p.cli.nome)}</b><div class="nt">${esc(p.cli.n)}</div></div><span class="nt">Ver perfil ›</span></div></div>` : "";
+  p.cli ? `<div class="cd tap" data-a="cli" data-cid="${p.cli.id}"><div class="r">${av(p.cli.i)}<div class="f"><div class="nt">Cliente</div><b>${esc(p.cli.nome)}</b><div class="nt">${p.cli.cidade ? esc(p.cli.cidade) + " · " : ""}${esc(p.cli.n)}</div></div><span class="nt">Ver perfil ›</span></div></div>` : "";
 const qP = (p) =>
-  head("Enviar orçamento", esc(p.t), 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}`) + galeria(p) + cliCard(p) +
+  head("Enviar orçamento", esc(p.t), 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}${locTxt(p)}${avisoEd(p)}`) + galeria(p) + cliCard(p) +
   `<input id="qv" type="number" inputmode="decimal" min="1" placeholder="Valor do serviço (R$)"><input id="qz" placeholder="Prazo. Ex.: 2 dias" maxlength="30"><textarea id="qm" placeholder="Mensagem para o cliente" maxlength="300"></textarea>` +
   tip("Você recebe o valor integral do orçamento. A taxa de 10% é paga pelo cliente.") + `<button class="bt" data-a="quote" data-id="${p.id}">Enviar orçamento</button></div>`;
-const detP = (p) => head(esc(p.t), ST[p.st], 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}`) + galeria(p) + cliCard(p) + (p.meu ? svc(p, "p") : "") + "</div>";
+const detP = (p) => head(esc(p.t), ST[p.st], 1) + `<div class="pd">` + card(`<div class="nt">${esc(p.c)}</div>${esc(p.d || "Sem detalhes.")}${locTxt(p)}${avisoEd(p)}`) + galeria(p) + cliCard(p) +
+  (!p.meu && p.jaOrcou && p.orc[0] ? card(`<div class="nt">Seu orçamento</div><div class="sp"><b>${R(p.orc[0].v)}</b><span class="nt">${esc(p.orc[0].z)}</span></div>${p.orc[0].m ? `<div class="nt">“${esc(p.orc[0].m)}”</div>` : ""}`) + tip("Aguardando o cliente decidir.") : "") +
+  (p.meu ? svc(p, "p") : "") + "</div>";
 
 const mes = (iso) => (iso ? new Date(iso).toLocaleDateString("pt-BR", { month: "short", year: "numeric" }).replace(" de ", "/").replace(".", "") : "");
 const estrelas = (n) => `<span class="es">${"★".repeat(n)}<span class="es0">${"★".repeat(5 - n)}</span></span>`;
@@ -171,17 +214,21 @@ function perfilCli(x, eu) {
       ? x.lista.map((a) => card(`<div class="sp">${estrelas(a.nota)}<span class="nt">${mes(a.data)}</span></div>${a.comentario ? `<div>“${esc(a.comentario)}”</div>` : ""}<div class="nt">${esc(a.autor)} · ${esc(a.categoria)}</div>`)).join("")
       : `<div class="nt">${eu ? "Você" : "Este cliente"} ainda não recebeu avaliações.</div>`) +
     (eu
-      ? `<h3>Editar meu perfil</h3><div class="cd"><input id="pci" placeholder="Cidade. Ex.: Campinas - SP" maxlength="60" value="${esc(x.cidade)}"><div class="nt">Seu nome aparece abreviado e seu e-mail nunca é mostrado.</div></div><button class="bt" data-a="salvaPerfil">Salvar perfil</button>`
+      ? `<h3>Configurações do perfil</h3><div class="cd">${camposBasicos()}<div class="nt">Para os profissionais, seu nome aparece abreviado e seu e-mail nunca é mostrado.</div></div><button class="bt" data-a="salvaPerfil">Salvar perfil</button><button class="b2" data-a="sair">Sair da conta</button>`
       : "") +
     "</div>"
   );
 }
 const CATS = ["Ar-condicionado", "Reparo elétrico", "Encanamento", "Construção civil", "Pintura"];
+// Nome e cidade: iguais para cliente e profissional
+let PERF_CID;
+const camposBasicos = () =>
+  `<div class="nt">Seu nome</div><input id="pno" maxlength="80" value="${esc(ME.nome)}">` +
+  `<div class="nt">Sua cidade</div><button class="b2 cidb" data-a="perfCid">📍 ${esc(fmtCid(PERF_CID !== undefined ? PERF_CID : ME.cidade) || "Escolha sua cidade")}</button>`;
 const editor = (x) =>
-  `<h3>Editar meu perfil</h3><div class="cd"><div class="nt">Serviços que você faz</div><div class="chips">${CATS.map((c) => `<label class="ck"><input type="checkbox" class="pc" value="${c}"${x.categorias.includes(c) ? " checked" : ""}> ${c}</label>`).join("")}</div>` +
-  `<input id="pci" placeholder="Cidade. Ex.: Campinas - SP" maxlength="60" value="${esc(x.cidade)}">` +
+  `<h3>Configurações do perfil</h3><div class="cd">${camposBasicos()}</div><div class="cd"><div class="nt">Serviços que você faz</div><div class="chips">${CATS.map((c) => `<label class="ck"><input type="checkbox" class="pc" value="${c}"${x.categorias.includes(c) ? " checked" : ""}> ${c}</label>`).join("")}</div>` +
   `<textarea id="pbi" placeholder="Conte sua experiência, tempo de profissão, diferenciais…" maxlength="500">${esc(x.bio)}</textarea></div>` +
-  `<button class="bt" data-a="salvaPerfil">Salvar perfil</button>`;
+  `<button class="bt" data-a="salvaPerfil">Salvar perfil</button><button class="b2" data-a="sair">Sair da conta</button>`;
 
 function render(keep) {
   let h = "";
@@ -189,10 +236,12 @@ function render(keep) {
   else if (!ME) h = authV();
   else {
     const c = ME.papel == "cliente", p = V.id && P(V.id);
-    if (V.n == "pro" && D.pro) h = perfil(D.pro, false);
+    if (V.n == "pros") h = prosV();
+    else if (V.n == "pro" && D.pro) h = perfil(D.pro, false);
     else if (V.n == "cli" && D.cli) h = perfilCli(D.cli, false);
     else if (V.n == "meu" && D.meu) h = c ? perfilCli(D.meu, true) : perfil(D.meu, true);
     else if (V.n == "new" && c) h = newC();
+    else if (V.n == "edit" && c && p && p.st == "aberto") h = editC(p);
     else if (V.n == "pay" && c && p && p.orc[V.i]) h = payC(p, V.i);
     else if (V.n == "q" && !c && p) h = qP(p);
     else if (V.n == "det" && p) h = c ? detC(p) : detP(p);
@@ -212,48 +261,114 @@ document.addEventListener("click", async (e) => {
       case "modo": modo = b.dataset.w; render(); return;
       case "auth": {
         b.disabled = true;
-        const body = { email: $("#em").value, senha: $("#se").value };
-        if (modo == "reg") { body.nome = $("#no").value; body.papel = $("#pa").value; }
+        guardaReg();
+        const body = { email: REG.em, senha: REG.se };
+        if (modo == "reg") {
+          body.nome = REG.no; body.papel = REG.pa;
+          if (!REG.cid) { b.disabled = false; throw new Error("Escolha sua cidade."); }
+          body.cidade = REG.cid.id;
+        }
         try {
           const r = await api("POST", modo == "reg" ? "/registro" : "/login", body);
           TOK = r.token; ME = r.usuario; guarda(TOK);
+          if (!CID || modo == "reg") trocaCidTopo(ME.cidade);
+          Object.assign(REG, { no: "", em: "", se: "", cid: null });
           await load();
           V = { n: "home" };
         } finally { b.disabled = false; }
         break;
       }
-      case "sair": TOK = null; ME = null; guarda(null); D.ps = []; V = { n: "home" }; break;
+      case "sair": TOK = null; ME = null; guarda(null); D.ps = []; V = { n: "home" }; CID = null; try { localStorage.removeItem(CID_KEY); } catch (e) {} break;
       case "home": V = { n: "home" }; await load(); break;
-      case "back": V = V.de || { n: "home" }; if (V.n == "home" || V.n == "det") await load(); break;
+      case "back": fechaEdicao(); V = V.de || { n: "home" }; if (V.n == "home" || V.n == "det") await load(); break;
       case "pro": D.pro = await api("GET", "/profissionais/" + b.dataset.pid); V = { n: "pro", de: V }; break;
       case "cli": D.cli = await api("GET", "/clientes/" + b.dataset.cid); V = { n: "cli", de: V }; break;
       case "rateCli": await api("POST", base + "/avaliar-cliente", { nota: star, comentario: ($("#rc") || { value: "" }).value }); await load(); star = 5; break;
-      case "meu": D.meu = await api("GET", "/perfil"); V = { n: "meu" }; break;
+      case "meu": PERF_CID = undefined; D.meu = await api("GET", "/perfil"); V = { n: "meu" }; break;
       case "salvaPerfil": {
         b.disabled = true;
+        const basico = { nome: $("#pno").value, ...(PERF_CID ? { cidade: PERF_CID.id } : {}) };
         try {
-          D.meu = await api("POST", "/perfil", ME.papel == "cliente" ? { cidade: $("#pci").value } : {
-            cidade: $("#pci").value,
+          D.meu = await api("POST", "/perfil", ME.papel == "cliente" ? basico : {
+            ...basico,
             bio: $("#pbi").value,
             categorias: [...document.querySelectorAll(".pc:checked")].map((x) => x.value),
           });
+          const antes = ME.cidade && ME.cidade.id;
+          ME = await api("GET", "/eu");
+          // trocou a cidade do perfil: o filtro do topo acompanha
+          if (ME.cidade && ME.cidade.id !== antes) trocaCidTopo(ME.cidade);
+          PERF_CID = undefined;
         } finally { b.disabled = false; }
         toast("Perfil salvo!", true);
         break;
       }
-      case "new": V = { n: "new" }; break;
+      case "regCid": guardaReg(); abreCidades("Sua cidade", (c) => { REG.cid = c; render(true); }); return;
+      case "perfCid": abreCidades("Sua cidade", (c) => { PERF_CID = c; render(true); }); return;
+      case "cidTopo":
+        abreCidades("Ver pedidos e profissionais de qual cidade?", async (c) => {
+          trocaCidTopo(c);
+          await load();
+          render(true);
+        });
+        return;
+      case "cidPedido": guardaForm(); abreCidades("Cidade onde será o serviço", (c) => { FORM.cid = c; contaPros(FORM); render(true); }); return;
+      case "raioPed": guardaForm(); FORM.raio = +b.dataset.r; contaPros(FORM); render(true); return;
+      case "busca": BUSCA.res = null; BUSCA.chave = ""; V = { n: "pros", de: V }; break;
+      case "raioBusca": BUSCA.raio = +b.dataset.r; carregaPros(); return;
+      case "new":
+        fechaEdicao();
+        if (!NOVO.cid) NOVO.cid = cidAtual() || ME.cidade;
+        if (NOVO.raio == null) NOVO.raio = 25;
+        contaPros(NOVO);
+        V = { n: "new" };
+        break;
+      case "editar": {
+        const p = P(id);
+        if (p.anx && p.anx.n && !(ANXV[id] && ANXV[id].lista && !ANXV[id].erro)) {
+          const r = await api("GET", `/pedidos/${id}/anexos`);
+          ANXV[id] = { lista: r.anexos, em: Date.now() };
+        }
+        abreEdicao(p);
+        FORM.cid = cidDe(p.loc.cidadeId, p.loc.cidade) || ME.cidade;
+        FORM.raio = p.loc.raio ?? 25;
+        contaPros(FORM);
+        V = { n: "edit", id, de: V };
+        break;
+      }
+      case "salvaEd": {
+        guardaForm();
+        b.disabled = true;
+        try {
+          await api("POST", base + "/editar", { titulo: FORM.t, categoria: FORM.cat, descricao: FORM.d, raio: FORM.raio, ...(FORM.cid ? { cidade: FORM.cid.id } : {}) });
+          for (const aid of FORM.rm) await api("POST", `${base}/anexos/${aid}/apagar`, {});
+        } finally { b.disabled = false; }
+        let env = { falhas: 0 };
+        if (FORM.anexos.length) {
+          render(true);
+          env = await enviaAnexos(id);
+        }
+        delete ANXV[id];
+        fechaEdicao();
+        await load();
+        V = { n: "det", id };
+        if (env.falhas) toast(`${env.falhas} anexo(s) não foram enviados (${env.erro}). O resto foi salvo.`);
+        else toast("Pedido atualizado!", true);
+        break;
+      }
       case "open": V = { n: "det", id }; break;
       case "pq": V = { n: "q", id }; break;
       case "pub": {
         guardaForm();
         b.disabled = true;
         let r;
-        try { r = await api("POST", "/pedidos", { titulo: NOVO.t, categoria: NOVO.cat, descricao: NOVO.d }); }
+        if (!NOVO.cid) { b.disabled = false; throw new Error("Escolha a cidade do serviço."); }
+        try { r = await api("POST", "/pedidos", { titulo: NOVO.t, categoria: NOVO.cat, descricao: NOVO.d, cidade: NOVO.cid.id, raio: NOVO.raio }); }
         finally { b.disabled = false; }
         if (NOVO.anexos.length) {
           render(true);
-          const falhas = await enviaAnexos(r.id);
-          if (falhas) toast(`${falhas} anexo(s) não puderam ser enviados. O pedido foi publicado mesmo assim.`);
+          const env = await enviaAnexos(r.id);
+          if (env.falhas) toast(`${env.falhas} anexo(s) não foram enviados (${env.erro}). Toque em "Editar pedido" para tentar de novo.`);
         }
         limpaNovo();
         await load();
@@ -279,7 +394,7 @@ document.addEventListener("keydown", (e) => {
 });
 // Atualiza a lista sozinha a cada 15 s (ex.: novos orçamentos), sem atrapalhar quem está digitando.
 setInterval(async () => {
-  if (!ME || document.hidden || V.n == "meu" || V.n == "new" || tocandoMidia()) return;
+  if (!ME || document.hidden || V.n == "meu" || V.n == "new" || V.n == "edit" || tocandoMidia()) return;
   const f = document.activeElement;
   if (f && /INPUT|TEXTAREA|SELECT/.test(f.tagName)) return;
   try { await load(); render(true); } catch (e) {}

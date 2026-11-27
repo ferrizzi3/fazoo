@@ -41,10 +41,19 @@ CREATE TABLE IF NOT EXISTS anexos(
   caminho TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'enviando',
   criado TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_anx_pedido ON anexos(pedido_id);
+CREATE TABLE IF NOT EXISTS pedidos_edicoes(
+  pedido_id INTEGER NOT NULL PRIMARY KEY REFERENCES pedidos(id),
+  vezes INTEGER NOT NULL DEFAULT 1, quando TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS ix_orc_pedido ON orcamentos(pedido_id);
 CREATE INDEX IF NOT EXISTS ix_msg_pedido ON mensagens(pedido_id);
 CREATE INDEX IF NOT EXISTS ix_ped_cliente ON pedidos(cliente_id);
 `;
+// Colunas adicionadas depois que o banco já existia. Cada uma é criada só se ainda não existir.
+const COLUNAS_NOVAS = [
+  ["usuarios", "cidade_id", "INTEGER"], // código IBGE da cidade do usuário
+  ["pedidos", "cidade_id", "INTEGER"], // cidade onde o serviço será feito
+  ["pedidos", "raio_km", "INTEGER"], // até quantos km os profissionais podem ver o pedido
+];
 // Valores em dinheiro ficam em centavos (inteiros) para evitar erros de arredondamento.
 
 export const schemaPostgres = () =>
@@ -65,6 +74,8 @@ async function sqlite(arquivo) {
   db.exec("PRAGMA foreign_keys = ON;");
   if (arquivo !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SCHEMA);
+  for (const [t, c, tipo] of COLUNAS_NOVAS)
+    if (!db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${tipo}`);
   const api = {
     all: async (s, ...a) => db.prepare(s).all(...a),
     one: async (s, ...a) => db.prepare(s).get(...a),
@@ -104,6 +115,7 @@ async function postgres(url) {
   try {
     await c.query("SELECT pg_advisory_lock(7351)"); // evita corrida entre instâncias ao criar as tabelas
     await c.query(schemaPostgres());
+    for (const [t, col, tipo] of COLUNAS_NOVAS) await c.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${col} ${tipo}`);
   } finally {
     try {
       await c.query("SELECT pg_advisory_unlock(7351)");

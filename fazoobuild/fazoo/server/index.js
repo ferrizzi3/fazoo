@@ -1,6 +1,7 @@
 import { hashSenha, confereSenha, assinaToken, verificaToken } from "./auth.js";
 import { pagamentos } from "./payments.js";
 import { criaArmazenamento } from "./armazenamento.js";
+import { cidade, nomeCidade, distanciaKm, dentroDoRaio, RAIOS } from "./cidades.js";
 import { randomBytes } from "node:crypto";
 
 const CATEGORIAS = ["Ar-condicionado", "Reparo elétrico", "Encanamento", "Construção civil", "Pintura"];
@@ -68,6 +69,15 @@ function texto(v, campo, min, max) {
   return s;
 }
 
+// Lê o código IBGE da cidade enviado pelo app. Vazio -> undefined; inválido -> erro.
+function cidadeInformada(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const c = cidade(v);
+  if (!c) throw new Erro(400, "Escolha a cidade na lista");
+  return c.id;
+}
+const usuarioPublico = (r) => ({ id: r.id, nome: r.nome, papel: r.papel, cidade: cidade(r.cidade_id) });
+
 const iniciais = (nome) =>
   nome
     .split(/\s+/)
@@ -115,7 +125,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
     const m = req.method;
 
     async function resumoCliente(id) {
-      const c = await one(`SELECT nome FROM usuarios WHERE id = ?`, id);
+      const c = await one(`SELECT nome, cidade_id FROM usuarios WHERE id = ?`, id);
       const r = await one(
         `SELECT COUNT(a.nota) AS na, AVG(a.nota) AS m FROM avaliacoes_cliente a JOIN pedidos p ON p.id = a.pedido_id WHERE p.cliente_id = ?`,
         id
@@ -125,6 +135,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
         id,
         nome: nomeCurto(c.nome),
         i: iniciais(nomeCurto(c.nome)),
+        cidade: nomeCidade(c.cidade_id),
         n: na ? `${Number(r.m).toFixed(1).replace(".", ",")} · ${na} avaliaç${na > 1 ? "ões" : "ão"}` : "Sem avaliações ainda",
       };
     }
@@ -144,7 +155,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
     // Do cliente que avaliou só aparece o primeiro nome e a inicial do sobrenome.
     async function perfilPublico(id) {
       const pro = await one(
-        `SELECT u.id, u.nome, u.criado, pf.bio, pf.cidade, pf.categorias
+        `SELECT u.id, u.nome, u.criado, u.cidade_id, pf.bio, pf.cidade, pf.categorias
          FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id WHERE u.id = ? AND u.papel = 'profissional'`,
         id
       );
@@ -165,7 +176,9 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
         nome: pro.nome,
         i: iniciais(pro.nome),
         bio: pro.bio || "",
-        cidade: pro.cidade || "",
+        cidade: nomeCidade(pro.cidade_id) || pro.cidade || "",
+        cidadeId: pro.cidade_id ?? null,
+        dist: distanciaKm(refCidade, pro.cidade_id),
         categorias: pro.categorias ? pro.categorias.split("|") : [],
         desde: dataIso(pro.criado),
         servicos: Number(est.c),
@@ -184,7 +197,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
     // Perfil básico do cliente: nome curto, cidade, data de cadastro e avaliações feitas pelos profissionais.
     async function perfilCliente(id) {
       const c = await one(
-        `SELECT u.id, u.nome, u.criado, pf.cidade FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id
+        `SELECT u.id, u.nome, u.criado, u.cidade_id, pf.cidade FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id
          WHERE u.id = ? AND u.papel = 'cliente'`,
         id
       );
@@ -206,7 +219,8 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
         tipo: "cliente",
         nome: nomeCurto(c.nome),
         i: iniciais(nomeCurto(c.nome)),
-        cidade: c.cidade || "",
+        cidade: nomeCidade(c.cidade_id) || c.cidade || "",
+        cidadeId: c.cidade_id ?? null,
         desde: dataIso(c.criado),
         servicos: Number(est.c),
         avaliacoes: Number(est.na),
@@ -264,6 +278,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
         const a = await one(`SELECT nota, comentario FROM avaliacoes_cliente WHERE pedido_id = ?`, p.id);
         if (a) avc = { nota: Number(a.nota), comentario: a.comentario || "" };
       }
+      const ed = await one(`SELECT quando FROM pedidos_edicoes WHERE pedido_id = ?`, p.id);
       const anx = { n: 0, apagados: 0 };
       for (const r of await all(`SELECT status, COUNT(*) AS c FROM anexos WHERE pedido_id = ? GROUP BY status`, p.id)) {
         if (r.status === "ok") anx.n = Number(r.c);
@@ -299,6 +314,8 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
         jaOrcou,
         pg,
         anx,
+        loc: { cidade: nomeCidade(p.cidade_id), cidadeId: p.cidade_id ?? null, raio: p.raio_km ?? null, dist: distanciaKm(p.cidade_id, refCidade) },
+        ed: ed ? dataIso(ed.quando) : null,
         avc: u.papel === "profissional" || p.status === "fin" ? avc : null,
         cli,
       };
@@ -320,7 +337,7 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
     async function usuarioDoToken() {
       const t = (req.headers.authorization || "").replace(/^Bearer /, "");
       const p = t && verificaToken(t, secret);
-      const u = p && (await one("SELECT id, nome, papel FROM usuarios WHERE id = ?", p.id));
+      const u = p && (await one("SELECT id, nome, papel, cidade_id FROM usuarios WHERE id = ?", p.id));
       if (!u) throw new Erro(401, "Faça login para continuar");
       return u;
     }
@@ -344,50 +361,86 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Erro(400, "E-mail inválido");
       const senha = texto(b.senha, "Senha", 6, 100);
       if (!["cliente", "profissional"].includes(b.papel)) throw new Erro(400, "Escolha cliente ou profissional");
+      const cidadeId = cidadeInformada(b.cidade) ?? null;
       let id;
       try {
-        id = await ins("INSERT INTO usuarios(nome,email,senha,papel) VALUES(?,?,?,?)", nome, email, hashSenha(senha), b.papel);
+        id = await ins("INSERT INTO usuarios(nome,email,senha,papel,cidade_id) VALUES(?,?,?,?,?)", nome, email, hashSenha(senha), b.papel, cidadeId);
       } catch (e) {
         if (db.ehDuplicado(e)) throw new Erro(409, "Este e-mail já está cadastrado");
         throw e;
       }
-      const usuario = { id, nome, papel: b.papel };
-      return json(res, 201, { token: assinaToken(usuario, secret), usuario });
+      const usuario = usuarioPublico({ id, nome, papel: b.papel, cidade_id: cidadeId });
+      return json(res, 201, { token: assinaToken({ id, nome, papel: b.papel }, secret), usuario });
     }
     if (m === "POST" && path === "/api/login") {
       limite(req);
       const b = await corpo(req);
       const r = await one("SELECT * FROM usuarios WHERE email = ?", String(b.email || "").trim().toLowerCase());
       if (!r || !confereSenha(String(b.senha || ""), r.senha)) throw new Erro(401, "E-mail ou senha incorretos");
-      const usuario = { id: r.id, nome: r.nome, papel: r.papel };
-      return json(res, 200, { token: assinaToken(usuario, secret), usuario });
+      return json(res, 200, { token: assinaToken({ id: r.id, nome: r.nome, papel: r.papel }, secret), usuario: usuarioPublico(r) });
     }
 
     const u = await usuarioDoToken();
-    if (m === "GET" && path === "/api/eu") return json(res, 200, u);
+    if (m === "GET" && path === "/api/eu") return json(res, 200, usuarioPublico(u));
+    const q = new URL(req.url, "http://x").searchParams;
+    // cidade de referência para os filtros: a escolhida no topo do app ou a do perfil
+    const refCidade = cidadeInformada(q.get("cidade")) ?? u.cidade_id;
+
+    // ---- Encontrar profissionais por cidade, raio e categoria ----
+    if (m === "GET" && path === "/api/profissionais") {
+      if (!refCidade) throw new Erro(400, "Escolha uma cidade");
+      const raio = RAIOS.includes(Number(q.get("raio"))) ? Number(q.get("raio")) : 25;
+      const cat = q.get("categoria") || "";
+      const pros = await all(
+        `SELECT u.id, u.nome, u.cidade_id, pf.categorias FROM usuarios u LEFT JOIN perfis pf ON pf.usuario_id = u.id
+         WHERE u.papel = 'profissional' AND u.cidade_id IS NOT NULL`
+      );
+      const perto = pros
+        .map((x) => ({ ...x, dist: distanciaKm(refCidade, x.cidade_id) }))
+        .filter((x) => x.dist != null && x.dist <= raio && (!cat || String(x.categorias || "").split("|").includes(cat)));
+      const lista = await Promise.all(
+        perto.slice(0, 200).map(async (x) => {
+          const est = await one(
+            `SELECT COUNT(*) AS c, COUNT(p.nota) AS na, AVG(p.nota) AS m FROM pedidos p JOIN orcamentos o ON o.id = p.orcamento_aceito
+             WHERE o.pro_id = ? AND p.status = 'fin'`,
+            x.id
+          );
+          return {
+            id: x.id, nome: x.nome, i: iniciais(x.nome), cidade: nomeCidade(x.cidade_id), dist: x.dist,
+            categorias: x.categorias ? x.categorias.split("|") : [],
+            servicos: Number(est.c), avaliacoes: Number(est.na), media: est.m == null ? null : Math.round(Number(est.m) * 10) / 10,
+          };
+        })
+      );
+      lista.sort((a, b) => a.dist - b.dist || (b.media ?? 0) - (a.media ?? 0) || b.servicos - a.servicos);
+      return json(res, 200, { cidade: cidade(refCidade), raio, total: lista.length, profissionais: lista });
+    }
+
 
     // ---- Perfil do profissional ----
+    // Configurações comuns aos dois tipos de conta: nome e cidade.
+    async function salvaBasico(b) {
+      if (b.nome !== undefined) await run("UPDATE usuarios SET nome = ? WHERE id = ?", texto(b.nome, "Nome", 2, 80), u.id);
+      const c = cidadeInformada(b.cidade);
+      if (c !== undefined) await run("UPDATE usuarios SET cidade_id = ? WHERE id = ?", c, u.id);
+    }
     if (m === "POST" && path === "/api/perfil" && u.papel === "cliente") {
-      const b = await corpo(req);
-      const cidade = texto(b.cidade, "Cidade", 0, 60);
-      await run(
-        `INSERT INTO perfis(usuario_id,cidade) VALUES(?,?) ON CONFLICT(usuario_id) DO UPDATE SET cidade = excluded.cidade`,
-        u.id, cidade
-      );
+      await salvaBasico(await corpo(req));
       return json(res, 200, await perfilCliente(u.id));
     }
     if (m === "GET" && path === "/api/perfil" && u.papel === "cliente") return json(res, 200, await perfilCliente(u.id));
     if (m === "POST" && path === "/api/perfil") {
       exige(u, "profissional");
       const b = await corpo(req);
+      await salvaBasico(b);
       const bio = texto(b.bio, "Sobre você", 0, 500);
-      const cidade = texto(b.cidade, "Cidade", 0, 60);
+      const cidadeTxt = "";
       const cats = Array.isArray(b.categorias) ? [...new Set(b.categorias)] : [];
       if (cats.some((c) => !CATEGORIAS.includes(c))) throw new Erro(400, "Categoria inválida");
       await run(
         `INSERT INTO perfis(usuario_id,bio,cidade,categorias) VALUES(?,?,?,?)
          ON CONFLICT(usuario_id) DO UPDATE SET bio = excluded.bio, cidade = excluded.cidade, categorias = excluded.categorias`,
-        u.id, bio, cidade, cats.join("|")
+        u.id, bio, cidadeTxt, cats.join("|")
       );
       return json(res, 200, await perfilPublico(u.id));
     }
@@ -417,8 +470,22 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
               `SELECT * FROM pedidos WHERE status = 'aberto' OR orcamento_aceito IN (SELECT id FROM orcamentos WHERE pro_id = ?) ORDER BY id DESC`,
               u.id
             );
+      // Profissional: pedidos novos só aparecem se o alcance escolhido pelo cliente chega à cidade de referência.
+      const visiveis =
+        u.papel === "profissional" && refCidade
+          ? (
+              await Promise.all(
+                linhas.map(async (p) =>
+                  p.status !== "aberto" || dentroDoRaio(p.cidade_id, p.raio_km, refCidade) ||
+                  (await one("SELECT 1 AS ok FROM orcamentos WHERE pedido_id = ? AND pro_id = ?", p.id, u.id))
+                    ? p
+                    : null
+                )
+              )
+            ).filter(Boolean)
+          : linhas;
       const rep = new Map();
-      return json(res, 200, await Promise.all(linhas.map((p) => fmt(p, u, rep))));
+      return json(res, 200, await Promise.all(visiveis.map((p) => fmt(p, u, rep))));
     }
     if (m === "POST" && path === "/api/pedidos") {
       exige(u, "cliente");
@@ -426,7 +493,12 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
       const titulo = texto(b.titulo, "Título", 3, 80);
       if (!CATEGORIAS.includes(b.categoria)) throw new Erro(400, "Categoria inválida");
       const descricao = texto(b.descricao, "Descrição", 0, 400);
-      const id = await ins("INSERT INTO pedidos(cliente_id,titulo,categoria,descricao) VALUES(?,?,?,?)", u.id, titulo, b.categoria, descricao);
+      const cidadeId = cidadeInformada(b.cidade) ?? u.cidade_id ?? null;
+      const raio = RAIOS.includes(Number(b.raio)) ? Number(b.raio) : 25;
+      const id = await ins(
+        "INSERT INTO pedidos(cliente_id,titulo,categoria,descricao,cidade_id,raio_km) VALUES(?,?,?,?,?,?)",
+        u.id, titulo, b.categoria, descricao, cidadeId, cidadeId ? raio : null
+      );
       return json(res, 201, await fmt(await one("SELECT * FROM pedidos WHERE id = ?", id), u, new Map()));
     }
 
@@ -499,6 +571,24 @@ export function criaManipulador({ obterBanco, secret, armazenamento }) {
     if (m !== "POST") throw new Erro(404, "Rota não encontrada");
     const b = await corpo(req);
 
+    if (acao === "editar") {
+      exige(u, "cliente");
+      if (p.status !== "aberto") throw new Erro(409, "Só dá para editar o pedido enquanto ele recebe orçamentos");
+      const titulo = texto(b.titulo, "Título", 3, 80);
+      if (!CATEGORIAS.includes(b.categoria)) throw new Erro(400, "Categoria inválida");
+      const descricao = texto(b.descricao, "Descrição", 0, 400);
+      await run("UPDATE pedidos SET titulo = ?, categoria = ?, descricao = ? WHERE id = ?", titulo, b.categoria, descricao, p.id);
+      const novaCidade = cidadeInformada(b.cidade);
+      if (novaCidade !== undefined) await run("UPDATE pedidos SET cidade_id = ? WHERE id = ?", novaCidade, p.id);
+      if (b.raio !== undefined && RAIOS.includes(Number(b.raio))) await run("UPDATE pedidos SET raio_km = ? WHERE id = ?", Number(b.raio), p.id);
+      // guarda que o pedido mudou depois de publicado (o profissional vê o aviso "Editado")
+      await run(
+        `INSERT INTO pedidos_edicoes(pedido_id) VALUES(?)
+         ON CONFLICT(pedido_id) DO UPDATE SET vezes = pedidos_edicoes.vezes + 1, quando = CURRENT_TIMESTAMP`,
+        p.id
+      );
+      return devolve();
+    }
     if (acao === "orcamentos") {
       exige(u, "profissional");
       if (p.status !== "aberto") throw new Erro(409, "Este pedido não recebe mais orçamentos");

@@ -8,7 +8,18 @@ const LIMITE = {
   audio: { qtd: 3, dur: 180, nome: "áudios" },
 };
 // Formulário do novo pedido fica guardado aqui para não se perder quando a tela é redesenhada.
-const NOVO = { cat: "Ar-condicionado", t: "", d: "", anexos: [] };
+const NOVO = { cat: "Ar-condicionado", t: "", d: "", anexos: [], exist: [], rm: new Set() };
+// Formulário em uso: o do novo pedido (NOVO) ou o da edição de um pedido já publicado.
+let FORM = NOVO;
+function abreEdicao(p) {
+  const c = ANXV[p.id];
+  FORM = { editando: p.id, cat: p.c, t: p.t, d: p.d || "", anexos: [], exist: c && c.lista ? c.lista.slice() : [], rm: new Set() };
+}
+function fechaEdicao() {
+  if (FORM === NOVO) return;
+  FORM.anexos.forEach((a) => URL.revokeObjectURL(a.url));
+  FORM = NOVO;
+}
 const ANXV = {}; // anexos já carregados de cada pedido: id -> { lista, em }
 const ABERTAS = new Set(); // pedidos com a galeria de fotos expandida
 const FOTOS_VISIVEIS = 8;
@@ -17,22 +28,33 @@ let ENVIO = null; // texto de progresso do envio
 
 const tipoBase = (m) => String(m || "").split(";")[0].trim().toLowerCase();
 const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const qtdTipo = (t) => NOVO.anexos.filter((a) => a.tipo == t).length;
+// conta os anexos novos e os já publicados que não foram marcados para remover
+const qtdTipo = (t) => FORM.anexos.filter((a) => a.tipo == t).length + FORM.exist.filter((a) => a.tipo == t && !FORM.rm.has(a.id)).length;
 
 function guardaForm() {
   if (!$("#t")) return;
-  NOVO.t = $("#t").value;
-  NOVO.d = $("#d").value;
-  NOVO.cat = $("#cat").value;
+  FORM.t = $("#t").value;
+  FORM.d = $("#d").value;
+  FORM.cat = $("#cat").value;
 }
 function limpaNovo() {
   NOVO.anexos.forEach((a) => URL.revokeObjectURL(a.url));
-  Object.assign(NOVO, { cat: "Ar-condicionado", t: "", d: "", anexos: [] });
+  Object.assign(NOVO, { cat: "Ar-condicionado", t: "", d: "", anexos: [], exist: [], rm: new Set(), cid: null, raio: null, npros: null });
 }
 
 // ---------- Tela do novo pedido ----------
 function barraAnexos() {
-  const prev = NOVO.anexos
+  // anexos já publicados (só na edição): toque no × para remover
+  const ja = FORM.exist
+    .filter((a) => !FORM.rm.has(a.id))
+    .map((a) => {
+      const x = `<button class="rmx" data-a="rmE" data-id="${a.id}" aria-label="Remover">×</button>`;
+      if (a.tipo == "foto") return `<div class="th">${x}<img src="${esc(a.url)}" alt=""></div>`;
+      if (a.tipo == "video") return `<div class="th">${x}<video src="${esc(a.url)}" muted playsinline preload="metadata"></video><span class="tg">▶ ${fmtDur(a.duracao)}</span></div>`;
+      return `<div class="au">${x}<span class="mi">🎤</span><audio src="${esc(a.url)}" controls preload="metadata"></audio></div>`;
+    })
+    .join("");
+  const prev = ja + FORM.anexos
     .map((a, i) => {
       const x = `<button class="rmx" data-a="rmA" data-k="${i}" aria-label="Remover">×</button>`;
       if (a.tipo == "foto") return `<div class="th">${x}<img src="${a.url}" alt=""></div>`;
@@ -41,9 +63,7 @@ function barraAnexos() {
     })
     .join("");
   const rec = GRAV
-    ? `<div class="rec"><span class="dot"></span><span id="rt">${fmtDur((Date.now() - GRAV.ini) / 1000)}</span><span class="f nt">${GRAV.travado ? "Gravando…" : "Solte para terminar"}</span>${
-        GRAV.travado ? `<button class="b2 sm" data-a="recCancel">Cancelar</button><button class="bt sm" data-a="recOk">✓</button>` : ""
-      }</div>`
+    ? `<div class="rec"><span class="dot"></span><span id="rt">${fmtDur((Date.now() - GRAV.ini) / 1000)}</span><span class="f nt">${GRAV.travado ? "Gravando…" : "Solte para terminar"}</span><button class="b2 sm" data-a="recCancel">Cancelar</button><button class="bt sm" data-a="recOk">✓</button></div>`
     : "";
   return (
     `<div class="nt">Anexos (opcional): mostre o problema com fotos, vídeo ou um áudio.</div>` +
@@ -106,7 +126,7 @@ document.addEventListener("change", async (e) => {
       if (inp.id == "inF") {
         if (qtdTipo("foto") >= LIMITE.foto.qtd) throw new Error(`Máximo de ${LIMITE.foto.qtd} fotos por pedido.`);
         const b = await comprimeFoto(f);
-        NOVO.anexos.push({ tipo: "foto", blob: b, mime: tipoBase(b.type), dur: 0, url: URL.createObjectURL(b) });
+        FORM.anexos.push({ tipo: "foto", blob: b, mime: tipoBase(b.type), dur: 0, url: URL.createObjectURL(b) });
       } else {
         if (qtdTipo("video") >= LIMITE.video.qtd) throw new Error(`Máximo de ${LIMITE.video.qtd} vídeos por pedido.`);
         const mime = tipoVideo(f);
@@ -118,7 +138,7 @@ document.addEventListener("change", async (e) => {
           URL.revokeObjectURL(url);
           throw new Error(`O vídeo pode ter no máximo ${LIMITE.video.dur} segundos.`);
         }
-        NOVO.anexos.push({ tipo: "video", blob: f, mime, dur, url });
+        FORM.anexos.push({ tipo: "video", blob: f, mime, dur, url });
       }
     }
   } catch (err) {
@@ -180,7 +200,7 @@ function paraGravacao(salvar) {
     if (salvar && dur >= 1 && g.partes.length) {
       const mime = tipoBase(g.rec.mimeType || g.partes[0].type || "audio/webm");
       const b = new Blob(g.partes, { type: mime });
-      NOVO.anexos.push({ tipo: "audio", blob: b, mime, dur: Math.round(dur), url: URL.createObjectURL(b) });
+      FORM.anexos.push({ tipo: "audio", blob: b, mime, dur: Math.round(dur), url: URL.createObjectURL(b) });
     } else if (salvar) toast("Áudio muito curto.");
     render(true);
   };
@@ -189,9 +209,19 @@ function paraGravacao(salvar) {
 document.addEventListener("pointerdown", (e) => {
   if (e.target.closest("#mic")) {
     e.preventDefault();
-    if (GRAV && GRAV.travado) return paraGravacao(true);
+    // tocar no 🎤 durante uma gravação termina e guarda o áudio
+    if (GRAV && !GRAV.pedindo) return paraGravacao(true);
     iniciaGravacao();
   }
+});
+// O celular pode "roubar" o toque (rolagem, aviso de permissão). Nesse caso continua
+// gravando no modo travado, com os botões ✓ e Cancelar, em vez de perder o áudio.
+document.addEventListener("pointercancel", () => {
+  const g = GRAV;
+  if (!g || g.travado) return;
+  if (g.pedindo) return (g.soltou = true);
+  g.travado = true;
+  render(true);
 });
 document.addEventListener("pointerup", () => {
   const g = GRAV;
@@ -213,8 +243,12 @@ document.addEventListener("click", (e) => {
   else if (a == "recCancel") paraGravacao(false);
   else if (a == "rmA") {
     guardaForm();
-    const [x] = NOVO.anexos.splice(+b.dataset.k, 1);
+    const [x] = FORM.anexos.splice(+b.dataset.k, 1);
     if (x) URL.revokeObjectURL(x.url);
+    render(true);
+  } else if (a == "rmE") {
+    guardaForm();
+    FORM.rm.add(+b.dataset.id);
     render(true);
   } else if (a == "maisFotos" || a == "menosFotos") {
     a == "maisFotos" ? ABERTAS.add(+b.dataset.id) : ABERTAS.delete(+b.dataset.id);
@@ -246,10 +280,10 @@ function mostraEnvio(t) {
   const el = $("#envio");
   if (el) el.textContent = t;
 }
-// Envia os anexos do novo pedido. Retorna quantos falharam.
+// Envia os anexos novos do formulário. Retorna quantos falharam e o primeiro erro.
 async function enviaAnexos(pedidoId) {
-  const lista = NOVO.anexos;
-  let falhas = 0;
+  const lista = FORM.anexos;
+  let falhas = 0, erro = "";
   for (let i = 0; i < lista.length; i++) {
     const a = lista[i];
     const rot = `Enviando anexo ${i + 1} de ${lista.length}`;
@@ -260,11 +294,12 @@ async function enviaAnexos(pedidoId) {
       await api("POST", `/pedidos/${pedidoId}/anexos/${r.id}/ok`, {});
     } catch (e) {
       falhas++;
+      erro ||= `${a.tipo == "audio" ? "áudio" : a.tipo == "video" ? "vídeo" : "foto"}: ${e.message}`;
       console.error(e);
     }
   }
   ENVIO = null;
-  return falhas;
+  return { falhas, erro };
 }
 
 // ---------- Ver anexos de um pedido ----------

@@ -138,15 +138,15 @@ test("perfil do profissional: edição, estatísticas e avaliações", async (t)
   assert.ok(vazio.j.desde);
 
   // cliente salva só a cidade: "sobre" e categorias são ignorados
-  const pc = (await call("POST", "/api/perfil", { bio: "x", categorias: ["Pintura"], cidade: "Jundiaí" }, ana)).j;
+  const pc = (await call("POST", "/api/perfil", { bio: "x", categorias: ["Pintura"], cidade: 3525904 }, ana)).j;
   assert.equal(pc.tipo, "cliente");
   assert.equal(pc.bio, undefined);
   assert.equal((await call("POST", "/api/perfil", { categorias: ["Jardinagem"] }, joao)).s, 400);
-  const ed = await call("POST", "/api/perfil", { bio: "Eletricista há 10 anos", cidade: "Campinas - SP", categorias: ["Reparo elétrico", "Ar-condicionado"] }, joao);
+  const ed = await call("POST", "/api/perfil", { bio: "Eletricista há 10 anos", cidade: 3509502, categorias: ["Reparo elétrico", "Ar-condicionado"] }, joao);
   assert.equal(ed.s, 200);
   assert.equal(ed.j.cidade, "Campinas - SP");
   // editar de novo atualiza em vez de duplicar
-  assert.equal((await call("POST", "/api/perfil", { bio: "Eletricista há 11 anos", cidade: "Campinas - SP", categorias: ["Reparo elétrico"] }, joao)).j.bio, "Eletricista há 11 anos");
+  assert.equal((await call("POST", "/api/perfil", { bio: "Eletricista há 11 anos", cidade: 3509502, categorias: ["Reparo elétrico"] }, joao)).j.bio, "Eletricista há 11 anos");
   assert.deepEqual((await call("GET", "/api/perfil", null, joao)).j.categorias, ["Reparo elétrico"]);
 
   // cliente não tem perfil público e id inexistente dá 404
@@ -183,7 +183,7 @@ test("perfil do cliente: quem pode ver e avaliação feita pelo profissional", a
   const livia = await conta(call, "Lívia Nunes", "livia@x.com", "profissional");
 
   // cliente vê e edita o próprio perfil; outro cliente não vê
-  assert.equal((await call("POST", "/api/perfil", { cidade: "Campinas - SP" }, ana)).j.cidade, "Campinas - SP");
+  assert.equal((await call("POST", "/api/perfil", { cidade: 3509502 }, ana)).j.cidade, "Campinas - SP");
   const meu = (await call("GET", "/api/perfil", null, ana)).j;
   assert.equal(meu.nome, "Ana S.");
   assert.equal(meu.tipo, "cliente");
@@ -316,4 +316,101 @@ test("anexos: aceita até 30 fotos por pedido", async (t) => {
   assert.equal(r31.s, 409);
   assert.match(r31.j.erro, /30 fotos/);
   assert.equal((await call("GET", `/api/pedidos/${id}`, null, ana)).j.anx.n, 30);
+});
+
+test("editar pedido: texto e anexos enquanto recebe orçamentos", async (t) => {
+  const { call, fecha, base } = await sobe();
+  t.after(fecha);
+  const ana = await conta(call, "Ana Souza", "ana@x.com", "cliente");
+  const bia = await conta(call, "Bia Lima", "bia@x.com", "cliente");
+  const joao = await conta(call, "João Ribeiro", "joao@x.com", "profissional");
+  const id = (await call("POST", "/api/pedidos", { titulo: "Torneira pingando", categoria: "Encanamento", descricao: "" }, ana)).j.id;
+  assert.equal((await call("GET", `/api/pedidos/${id}`, null, ana)).j.ed, null);
+  await call("POST", `/api/pedidos/${id}/orcamentos`, { valor: 100, prazo: "1 dia" }, joao);
+
+  // só a dona do pedido edita
+  assert.equal((await call("POST", `/api/pedidos/${id}/editar`, { titulo: "x", categoria: "Pintura" }, joao)).s, 403);
+  assert.equal((await call("POST", `/api/pedidos/${id}/editar`, { titulo: "Outro", categoria: "Pintura" }, bia)).s, 404);
+  assert.equal((await call("POST", `/api/pedidos/${id}/editar`, { titulo: "Torneira", categoria: "Jardim" }, ana)).s, 400);
+  const ed = await call("POST", `/api/pedidos/${id}/editar`, { titulo: "Torneira e sifão pingando", categoria: "Encanamento", descricao: "Gravei um áudio explicando" }, ana);
+  assert.equal(ed.s, 200);
+  assert.equal(ed.j.t, "Torneira e sifão pingando");
+  assert.ok(ed.j.ed);
+  // o profissional vê a versão nova e o aviso de edição
+  const vp = (await call("GET", `/api/pedidos/${id}`, null, joao)).j;
+  assert.equal(vp.d, "Gravei um áudio explicando");
+  assert.ok(vp.ed);
+  // editar de novo funciona (atualiza o registro de edição)
+  assert.equal((await call("POST", `/api/pedidos/${id}/editar`, { titulo: "Torneira e sifão", categoria: "Encanamento", descricao: "" }, ana)).s, 200);
+
+  // depois de publicado ainda dá para adicionar e remover anexos
+  const r = await call("POST", `/api/pedidos/${id}/anexos`, { tipo: "audio", mime: "audio/mp4", tamanho: 5, duracao: 20 }, ana);
+  await fetch(base + r.j.url, { method: "PUT", headers: { "Content-Type": "audio/mp4" }, body: "audio" });
+  assert.equal((await call("POST", `/api/pedidos/${id}/anexos/${r.j.id}/ok`, {}, ana)).s, 200);
+  assert.equal((await call("GET", `/api/pedidos/${id}`, null, ana)).j.anx.n, 1);
+  assert.equal((await call("POST", `/api/pedidos/${id}/anexos/${r.j.id}/apagar`, {}, ana)).s, 200);
+  assert.deepEqual((await call("GET", `/api/pedidos/${id}`, null, ana)).j.anx, { n: 0, apagados: 1 });
+
+  // depois de aceitar um orçamento não dá mais para editar
+  const o = (await call("GET", `/api/pedidos/${id}`, null, ana)).j.orc[0];
+  await call("POST", `/api/pedidos/${id}/aceitar`, { orcamentoId: o.id }, ana);
+  assert.equal((await call("POST", `/api/pedidos/${id}/editar`, { titulo: "Mudou", categoria: "Encanamento" }, ana)).s, 409);
+});
+
+// Códigos IBGE usados nos testes
+const CAMPINAS = 3509502, SUMARE = 3552403, JUNDIAI = 3525904, SAO_PAULO = 3550308, RIO = 3304557;
+
+test("cidades: cadastro, distância, raio do pedido e busca de profissionais", async (t) => {
+  const { call, fecha } = await sobe();
+  t.after(fecha);
+  const reg = async (nome, email, papel, cidade) => (await call("POST", "/api/registro", { nome, email, senha: "123456", papel, cidade })).j;
+  assert.equal((await call("POST", "/api/registro", { nome: "X", email: "x@x.com", senha: "123456", papel: "cliente", cidade: "Campinas" })).s, 400);
+  const ana = await reg("Ana Souza", "ana@x.com", "cliente", CAMPINAS);
+  assert.deepEqual(ana.usuario.cidade, { id: CAMPINAS, nome: "Campinas", uf: "SP" });
+  assert.deepEqual((await call("GET", "/api/eu", null, ana.token)).j.cidade.nome, "Campinas");
+  const joao = await reg("João Sumaré", "joao@x.com", "profissional", SUMARE); // ~18 km de Campinas
+  const lia = await reg("Lia Jundiaí", "lia@x.com", "profissional", JUNDIAI); // ~37 km
+  const rui = await reg("Rui Rio", "rui@x.com", "profissional", RIO); // ~400 km
+  const bel = await reg("Bel Campinas", "bel@x.com", "profissional", CAMPINAS);
+  await call("POST", "/api/perfil", { bio: "", categorias: ["Pintura"] }, bel.token);
+
+  // busca de profissionais pela cidade escolhida no topo
+  const busca = async (cidade, raio, categoria = "") =>
+    (await call("GET", `/api/profissionais?cidade=${cidade}&raio=${raio}&categoria=${encodeURIComponent(categoria)}`, null, ana.token)).j;
+  assert.deepEqual((await busca(CAMPINAS, 0)).profissionais.map((x) => x.nome), ["Bel Campinas"]);
+  const r25 = await busca(CAMPINAS, 25);
+  assert.deepEqual(r25.profissionais.map((x) => x.nome), ["Bel Campinas", "João Sumaré"]);
+  assert.equal(r25.profissionais[1].cidade, "Sumaré - SP");
+  assert.ok(r25.profissionais[1].dist > 10 && r25.profissionais[1].dist <= 25);
+  assert.equal((await busca(CAMPINAS, 50)).total, 3);
+  assert.deepEqual((await busca(CAMPINAS, 100, "Pintura")).profissionais.map((x) => x.nome), ["Bel Campinas"]);
+  assert.equal((await busca(RIO, 10)).profissionais[0].nome, "Rui Rio");
+
+  // pedido com alcance de 25 km: Sumaré vê, Jundiaí e Rio não
+  const ped = (await call("POST", "/api/pedidos", { titulo: "Pintar sala", categoria: "Pintura", descricao: "", raio: 25 }, ana.token)).j;
+  assert.deepEqual(ped.loc, { cidade: "Campinas - SP", cidadeId: CAMPINAS, raio: 25, dist: 0 });
+  const vePedido = async (tok, cidade) => (await call("GET", "/api/pedidos" + (cidade ? `?cidade=${cidade}` : ""), null, tok)).j.length;
+  assert.equal(await vePedido(joao.token), 1);
+  assert.equal(await vePedido(bel.token), 1);
+  assert.equal(await vePedido(lia.token), 0);
+  assert.equal(await vePedido(rui.token), 0);
+  // o profissional do Rio troca a cidade do topo para Campinas e passa a ver
+  assert.equal(await vePedido(rui.token, CAMPINAS), 1);
+  // depois de orçar, o pedido continua aparecendo para ele mesmo fora do raio
+  await call("POST", `/api/pedidos/${ped.id}/orcamentos`, { valor: 300, prazo: "2 dias" }, rui.token);
+  assert.equal(await vePedido(rui.token), 1);
+  // a cliente aumenta o alcance para 50 km: Jundiaí passa a ver
+  await call("POST", `/api/pedidos/${ped.id}/editar`, { titulo: "Pintar sala", categoria: "Pintura", descricao: "", raio: 50 }, ana.token);
+  assert.equal(await vePedido(lia.token), 1);
+  // pedido em outra cidade, só na mesma cidade (raio 0)
+  await call("POST", "/api/pedidos", { titulo: "Trocar chuveiro", categoria: "Reparo elétrico", descricao: "", cidade: SAO_PAULO, raio: 0 }, ana.token);
+  assert.equal(await vePedido(bel.token), 1);
+  assert.equal(await vePedido(bel.token, SAO_PAULO), 1);
+
+  // configurações do perfil: nome e cidade
+  const cfg = (await call("POST", "/api/perfil", { nome: "Ana Maria Souza", cidade: JUNDIAI }, ana.token)).j;
+  assert.equal(cfg.cidade, "Jundiaí - SP");
+  assert.equal((await call("GET", "/api/eu", null, ana.token)).j.nome, "Ana Maria Souza");
+  assert.equal((await call("POST", "/api/perfil", { cidade: 123 }, ana.token)).s, 400);
+  assert.equal((await call("GET", `/api/profissionais/${joao.usuario.id}`, null, ana.token)).j.cidade, "Sumaré - SP");
 });
